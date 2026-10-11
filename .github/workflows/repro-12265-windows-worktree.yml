@@ -1,0 +1,164 @@
+name: Repro 12265 (Windows worktree)
+
+# Reproduces https://github.com/shadcn-ui/ui/issues/12265 on Windows.
+# Runs `shadcn add` in a monorepo checked out as a git worktree and logs the
+# paths the CLI compares when it looks for the workspace package root.
+
+on:
+  workflow_dispatch:
+    inputs:
+      shadcn_version:
+        description: shadcn CLI version to test
+        default: "4.21.1"
+      pnpm_version:
+        description: pnpm version
+        default: "11.24.0"
+      node_version:
+        description: Node.js version
+        default: "26"
+  push:
+    branches: ["repro/**"]
+
+jobs:
+  repro:
+    runs-on: windows-latest
+    name: shadcn add in a git worktree
+    env:
+      SHADCN_VERSION: ${{ inputs.shadcn_version || '4.21.1' }}
+    steps:
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version || '26' }}
+
+      - uses: pnpm/action-setup@v4
+        name: Install pnpm
+        with:
+          version: ${{ inputs.pnpm_version || '11.24.0' }}
+          run_install: false
+
+      - name: Configure git
+        run: |
+          git config --global user.name "repro"
+          git config --global user.email "repro@example.com"
+
+      # Preloaded into the CLI through NODE_OPTIONS. findPackageRoot calls
+      # path.relative(commonRoot, resolvedPath), so logging path.relative
+      # shows both values without patching the published bundle.
+      - name: Write diagnostic preload
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/shadcn-diag.cjs" <<'EOF'
+          const fs = require("fs")
+          const path = require("path")
+
+          const logFile = process.env.SHADCN_DIAG_LOG
+          const isShadcn = /[\\/]shadcn[\\/]dist[\\/]index\.js$/.test(
+            process.argv[1] || ""
+          )
+
+          if (logFile && isShadcn) {
+            const seen = new Set()
+            const log = (line) => fs.appendFileSync(logFile, line + "\n")
+            const cwd = process.cwd()
+
+            log(`argv: ${process.argv.slice(1).join(" ")}`)
+            log(`process.cwd(): ${cwd}`)
+            log(`realpath(cwd): ${fs.realpathSync.native(cwd)}`)
+
+            const relative = path.relative
+            path.relative = function (from, to) {
+              const result = relative.call(path, from, to)
+              const key = `${from}|${to}`
+              if (!seen.has(key) && seen.size < 300) {
+                seen.add(key)
+                log(
+                  `path.relative(${JSON.stringify(from)}, ${JSON.stringify(
+                    to
+                  )}) => ${JSON.stringify(result)}`
+                )
+              }
+              return result
+            }
+          }
+          EOF
+
+      - name: Scaffold the monorepo
+        run: |
+          $sources = Join-Path $env:USERPROFILE "sources"
+          New-Item -ItemType Directory -Force $sources | Out-Null
+          Set-Location $sources
+          pnpm dlx "shadcn@$env:SHADCN_VERSION" init --monorepo -t vite -b radix -p nova -n vite-monorepo -y --no-rtl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The first worktree uses the layout from the issue: a sibling folder
+      # whose name starts with the main repo's name. The second one has an
+      # unrelated name, to tell a worktree problem from a name-prefix problem.
+      - name: Create the worktrees
+        run: |
+          $sources = Join-Path $env:USERPROFILE "sources"
+          Set-Location (Join-Path $sources "vite-monorepo")
+          git worktree add ..\vite-monorepo.worktrees\vite-monorepo_2 -b vite-monorepo_2
+          git worktree add ..\other-worktrees\copy -b copy
+          foreach ($dir in "vite-monorepo.worktrees\vite-monorepo_2", "other-worktrees\copy") {
+            Set-Location (Join-Path $sources $dir)
+            pnpm install
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Run shadcn add
+        run: |
+          $ErrorActionPreference = "Continue"
+          $sources = Join-Path $env:USERPROFILE "sources"
+          $preload = (Join-Path $env:RUNNER_TEMP "shadcn-diag.cjs") -replace "\\", "/"
+          $logFile = Join-Path $env:RUNNER_TEMP "shadcn-diag.log"
+
+          node --version
+          pnpm --version
+          git --version
+
+          $scenarios = @(
+            @{ Name = "main checkout"; Root = "vite-monorepo" },
+            @{ Name = "worktree (layout from the issue)"; Root = "vite-monorepo.worktrees\vite-monorepo_2" },
+            @{ Name = "worktree (unrelated name)"; Root = "other-worktrees\copy" }
+          )
+
+          $summary = @(
+            "## shadcn@$env:SHADCN_VERSION add avatar",
+            "",
+            "| Checkout | Package | Exit code | Workspace config error |",
+            "| --- | --- | --- | --- |"
+          )
+
+          foreach ($scenario in $scenarios) {
+            $root = Join-Path $sources $scenario.Root
+
+            foreach ($package in "packages\ui", "apps\web") {
+              # Start every run from a clean tree.
+              git -C $root checkout -- .
+              git -C $root clean -fd | Out-Null
+              Remove-Item $logFile -ErrorAction SilentlyContinue
+
+              Set-Location (Join-Path $root $package)
+              $env:SHADCN_DIAG_LOG = $logFile
+              $env:NODE_OPTIONS = "--require $preload"
+              $output = pnpm dlx "shadcn@$env:SHADCN_VERSION" add avatar 2>&1 | Out-String
+              $exitCode = $LASTEXITCODE
+              Remove-Item Env:NODE_OPTIONS
+              Remove-Item Env:SHADCN_DIAG_LOG
+
+              $reproduced = $output -match "Could not load the workspace config"
+
+              Write-Host "::group::$($scenario.Name) - $package (exit $exitCode)"
+              Write-Host "cwd: $(Get-Location)"
+              Write-Host $output
+              Write-Host "--- diagnostic log ---"
+              if (Test-Path $logFile) { Get-Content $logFile | Write-Host }
+              Write-Host "::endgroup::"
+
+              $summary += "| $($scenario.Name) | $package | $exitCode | $(if ($reproduced) { 'yes' } else { 'no' }) |"
+            }
+          }
+
+          $summary | Add-Content $env:GITHUB_STEP_SUMMARY
+          exit 0
