@@ -1,4 +1,5 @@
 name: Repro 12265 (Windows worktree)
+run-name: "After fix: shadcn built from the fix branch on Windows (#12265)"
 
 # Reproduces https://github.com/shadcn-ui/ui/issues/12265 on Windows.
 # Runs `shadcn add` in a monorepo checked out as a git worktree and logs the
