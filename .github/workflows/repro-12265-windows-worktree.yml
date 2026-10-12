@@ -36,7 +36,6 @@ jobs:
       - uses: pnpm/action-setup@v4
         name: Install pnpm
         with:
-          version: ${{ inputs.pnpm_version || '11.24.0' }}
           run_install: false
 
       # Build the CLI from this branch so the run tests the fix, not npm.
