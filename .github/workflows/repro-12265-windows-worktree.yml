@@ -26,6 +26,8 @@ jobs:
     env:
       SHADCN_VERSION: ${{ inputs.shadcn_version || '4.21.1' }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -36,6 +38,14 @@ jobs:
         with:
           version: ${{ inputs.pnpm_version || '11.24.0' }}
           run_install: false
+
+      # Build the CLI from this branch so the run tests the fix, not npm.
+      - name: Build shadcn from source
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec turbo run build --filter=shadcn
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Configure git
         run: |
@@ -112,6 +122,7 @@ jobs:
           $sources = Join-Path $env:USERPROFILE "sources"
           $preload = (Join-Path $env:RUNNER_TEMP "shadcn-diag.cjs") -replace "\\", "/"
           $logFile = Join-Path $env:RUNNER_TEMP "shadcn-diag.log"
+          $cli = Join-Path $env:GITHUB_WORKSPACE "packages\shadcn\dist\index.js"
 
           node --version
           pnpm --version
@@ -124,7 +135,7 @@ jobs:
           )
 
           $summary = @(
-            "## shadcn@$env:SHADCN_VERSION add avatar",
+            "## shadcn (built from this branch) add avatar",
             "",
             "| Checkout | Package | Exit code | Workspace config error |",
             "| --- | --- | --- | --- |"
@@ -142,7 +153,7 @@ jobs:
               Set-Location (Join-Path $root $package)
               $env:SHADCN_DIAG_LOG = $logFile
               $env:NODE_OPTIONS = "--require $preload"
-              $output = pnpm dlx "shadcn@$env:SHADCN_VERSION" add avatar 2>&1 | Out-String
+              $output = node $cli add avatar 2>&1 | Out-String
               $exitCode = $LASTEXITCODE
               Remove-Item Env:NODE_OPTIONS
               Remove-Item Env:SHADCN_DIAG_LOG
