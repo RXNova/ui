@@ -124,6 +124,7 @@ jobs:
             @{ Name = "worktree (unrelated name)"; Root = "other-worktrees\copy" }
           )
 
+          $failures = 0
           $summary = @(
             "## shadcn@$env:SHADCN_VERSION add avatar",
             "",
@@ -149,6 +150,7 @@ jobs:
               Remove-Item Env:SHADCN_DIAG_LOG
 
               $reproduced = $output -match "Could not load the workspace config"
+              if ($reproduced -or $exitCode -ne 0) { $failures++ }
 
               Write-Host "::group::$($scenario.Name) - $package (exit $exitCode)"
               Write-Host "cwd: $(Get-Location)"
@@ -162,4 +164,9 @@ jobs:
           }
 
           $summary | Add-Content $env:GITHUB_STEP_SUMMARY
-          exit 0
+
+          # Every scenario runs first, then the job fails if any of them did.
+          if ($failures -gt 0) {
+            Write-Host "::error::shadcn add failed in $failures of 6 runs."
+            exit 1
+          }
